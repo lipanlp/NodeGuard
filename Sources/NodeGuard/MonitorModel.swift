@@ -86,6 +86,7 @@ private struct RuntimePoll {
     private var lastKill = Date.distantPast
     private var badUploadCount = 0
     private var claudeFailures = 0
+    private var claudeAlertGate = ExitAlertGate(), gptAlertGate = ExitAlertGate()
     private var quarantined: [String: Date] = [:]
     private var issues: [String: String] = [:]
     private var revision = 0
@@ -413,7 +414,7 @@ private struct RuntimePoll {
             guard !paused, version == revision else { return }
             switch pair.0 {
             case .success(let value):
-                claudeExit = value; claudeError = nil; claudeFailures = 0; clear("claude-network")
+                claudeExit = value; claudeError = nil; claudeFailures = 0; claudeAlertGate.passed(); clear("claude-network")
                 if snapshot.flatMap({ ExitRoute.current(snapshot: $0, settings: settings) })?.matches(value) != true { let reason = "Claude 实际探测连接与当前出口路由不一致，无法确认锁定 IP"; issue("claude-route", reason); trip(reason) } else { clear("claude-route") }
                 if value.country == "CN" { issue("claude-country", "Claude 出口回到中国大陆"); trip("Claude 出口回到中国大陆") } else { clear("claude-country") }
                 if !settings.allowedClaudeIPs.isEmpty, let reason = ProtectionPolicy.exitViolation(value, allowedIPs: settings.allowedClaudeIPs) { issue("claude-ip", reason); trip(reason) } else { clear("claude-ip") }
@@ -421,13 +422,17 @@ private struct RuntimePoll {
                    ProtectionPolicy.exitViolation(value, allowedIPs: settings.allowedClaudeIPs) == nil,
                    ProtectionPolicy.topologyViolation(snapshot: s, settings: settings, claudePaths: ProcessGuard.monitoredPathPrefixes()) == nil { clear("protection"); if settings.strictProtection { strictMachine.verified(at: value.date); syncProtection() } }
             case .failure(let error):
-                let failure = ProbeFailure.classify(error); claudeError = failure.localizedDescription; if failure.kind != .local { claudeFailures += 1 }; issue("claude-network", "Claude 出口探测未通过，暂时无法验证：\(failure.localizedDescription)"); if settings.strictProtection { strictMachine.failed(failure.kind); syncProtection() }
+                let failure = ProbeFailure.classify(error); claudeError = failure.localizedDescription; if failure.kind != .local { claudeFailures += 1 }
+                if claudeAlertGate.failed() { issue("claude-network", "Claude 出口连续 \(claudeAlertGate.failures) 次探测未通过，暂时无法验证：\(failure.localizedDescription)", since: claudeAlertGate.firstFailure, observations: claudeAlertGate.failures) }
+                if settings.strictProtection { strictMachine.failed(failure.kind); syncProtection() }
             }
             switch pair.1 {
             case .success(let value):
-                gptExit = value; gptError = nil; clear("gpt-network")
+                gptExit = value; gptError = nil; gptAlertGate.passed(); clear("gpt-network")
                 if value.country == "CN" { issue("gpt-country", "GPT 出口回到中国大陆") } else { clear("gpt-country") }
-            case .failure(let error): gptError = error.localizedDescription; issue("gpt-network", "GPT 出口探测未通过，暂时无法验证：\(error.localizedDescription)")
+            case .failure(let error):
+                gptError = error.localizedDescription
+                if gptAlertGate.failed() { issue("gpt-network", "GPT 出口连续 \(gptAlertGate.failures) 次探测未通过，暂时无法验证：\(error.localizedDescription)", since: gptAlertGate.firstFailure, observations: gptAlertGate.failures) }
             }
             onStatusChange?()
         }
@@ -858,9 +863,9 @@ private struct RuntimePoll {
             if result.failed > 0 { event("critical", "有 \(result.failed) 个 Claude 进程无法结束，请立即人工退出", notify: true) }
         }
     }
-    private func issue(_ key: String, _ message: String, level: String = "warning") {
+    private func issue(_ key: String, _ message: String, level: String = "warning", since: Date? = nil, observations: Int = 1) {
         issues[key] = message
-        var records = state.incidents ?? []; let change = IncidentLedger.raise(&records, key: key, level: level, message: message, inventory: inventoryStable ? state.inventoryKey : nil, front: currentFront); state.incidents = records
+        var records = state.incidents ?? []; let change = IncidentLedger.raise(&records, key: key, level: level, message: message, inventory: inventoryStable ? state.inventoryKey : nil, front: currentFront, since: since, observations: observations); state.incidents = records
         if change != .updated { event(level, message, notify: true) } else { save() }
     }
     private func clear(_ key: String) {

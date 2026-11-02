@@ -103,13 +103,31 @@ public struct GuardIncident: Codable, Identifiable, Equatable {
     public init(key: String, level: String, message: String, now: Date, inventory: String? = nil, front: String? = nil) { id = UUID(); self.key = key; self.level = level; self.message = message; firstSeen = now; lastSeen = now; count = 1; lastNotified = now; inventoryKey = inventory; frontName = front }
 }
 public enum IncidentChange { case opened, escalated, reminder, updated }
+/// One failed exit probe only proves that one new connection did not finish; alert on consecutive
+/// failures. Strict protection is fed every failure separately and keeps its own deadline.
+public struct ExitAlertGate {
+    public static let consecutiveFailures = 2
+    public private(set) var failures = 0
+    public private(set) var firstFailure: Date?
+    public init() {}
+    public var alerting: Bool { failures >= Self.consecutiveFailures }
+    public mutating func failed(now: Date = Date()) -> Bool { failures += 1; if firstFailure == nil { firstFailure = now }; return alerting }
+    public mutating func passed() { self = ExitAlertGate() }
+}
+
 public enum IncidentLedger {
-    public static func raise(_ records: inout [GuardIncident], key: String, level: String, message: String, now: Date = Date(), inventory: String? = nil, front: String? = nil) -> IncidentChange {
+    // `since` and `observations` describe evidence gathered before a debounced incident was opened.
+    public static func raise(_ records: inout [GuardIncident], key: String, level: String, message: String, now: Date = Date(), inventory: String? = nil, front: String? = nil, since: Date? = nil, observations: Int = 1) -> IncidentChange {
+        func open() {
+            var incident = GuardIncident(key: key, level: level, message: String(message.prefix(600)), now: now, inventory: inventory, front: front)
+            if let since = since, since <= now { incident.firstSeen = since }
+            incident.count = max(1, min(1_000_000, observations))
+            records.insert(incident, at: 0); trim(&records)
+        }
         if let i = records.firstIndex(where: { $0.key == key && $0.resolvedAt == nil }) {
             if records[i].inventoryKey != inventory || records[i].frontName != front {
                 records[i].resolvedAt = now; records[i].resolutionReason = "contextChanged"
-                records.insert(GuardIncident(key: key, level: level, message: String(message.prefix(600)), now: now, inventory: inventory, front: front), at: 0)
-                trim(&records); return .opened
+                open(); return .opened
             }
             let escalate = level == "critical" && records[i].level != "critical"
             records[i].count = min(1_000_000, records[i].count + 1); records[i].lastSeen = now; records[i].message = String(message.prefix(600)); records[i].level = level
@@ -117,8 +135,7 @@ public enum IncidentLedger {
             if escalate || reminder { records[i].lastNotified = now }
             return escalate ? .escalated : (reminder ? .reminder : .updated)
         }
-        records.insert(GuardIncident(key: key, level: level, message: String(message.prefix(600)), now: now, inventory: inventory, front: front), at: 0)
-        trim(&records); return .opened
+        open(); return .opened
     }
     public static func resolve(_ records: inout [GuardIncident], key: String, now: Date = Date()) -> GuardIncident? {
         guard let i = records.firstIndex(where: { $0.key == key && $0.resolvedAt == nil }) else { return nil }

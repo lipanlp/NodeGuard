@@ -48,6 +48,25 @@ func runV43Cases() {
         }.measurement
         return r.success && fallbackBytes > 0 && fallbackBytes <= 524_288 && abs(r.uploadSeconds - 6) < 0.001
     }
+    test("a single failed exit probe followed by a pass never opens an alert") {
+        var gate = ExitAlertGate(); let first = gate.failed(now: now); gate.passed()
+        return !first && !gate.alerting && gate.failures == 0 && gate.firstFailure == nil
+    }
+    test("consecutive exit probe failures alert from the first failure time with every probe counted") {
+        var gate = ExitAlertGate(); _ = gate.failed(now: now.addingTimeInterval(-6)); let alert = gate.failed(now: now)
+        var rows: [GuardIncident] = []
+        let change = IncidentLedger.raise(&rows, key: "claude-network", level: "warning", message: "连续 2 次", now: now, since: gate.firstFailure, observations: gate.failures)
+        let resolved = IncidentLedger.resolve(&rows, key: "claude-network", now: now.addingTimeInterval(5))
+        return alert && change == .opened && resolved?.count == 2 && resolved.map { $0.resolvedAt!.timeIntervalSince($0.firstSeen) } == 11
+    }
+    test("later failures in one alert update it silently and a pass resets the debounce") {
+        var gate = ExitAlertGate(); var rows: [GuardIncident] = []; var changes: [IncidentChange] = []
+        for i in 0..<4 where gate.failed(now: now.addingTimeInterval(Double(i * 5))) {
+            changes.append(IncidentLedger.raise(&rows, key: "gpt-network", level: "warning", message: "x", now: now.addingTimeInterval(Double(i * 5)), since: gate.firstFailure, observations: gate.failures))
+        }
+        gate.passed()
+        return changes == [.opened, .updated, .updated] && rows.first?.count == 4 && !gate.failed(now: now.addingTimeInterval(30))
+    }
     test("primary 1 MB upload seconds are recorded unscaled") {
         let r = try DiagnosticRunner.run(candidate: "A", settings: options, kind: .full, transport: v3Transport).measurement
         return r.success && r.uploadSeconds == 1 && !r.stages.contains { $0.endpoint == .bingoUpload }
