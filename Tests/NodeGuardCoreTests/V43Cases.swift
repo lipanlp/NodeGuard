@@ -67,6 +67,37 @@ func runV43Cases() {
         gate.passed()
         return changes == [.opened, .updated, .updated] && rows.first?.count == 4 && !gate.failed(now: now.addingTimeInterval(30))
     }
+    test("exit probes that only fail never terminate Claude however long they last") {
+        var m = StrictProtectionMachine(); m.verified(at: now)
+        var tripped = false
+        for i in 1...60 { m.failed(.timeout, now: now.addingTimeInterval(Double(i * 5))); if m.evaluate(grace: 12, now: now.addingTimeInterval(Double(i * 5))) != nil { tripped = true } }
+        return !tripped && m.phase == .holding && m.needsNetworkRecovery && m.reason.contains("保留 Claude")
+    }
+    test("immediate grace still holds rather than terminating when only the exit is down") {
+        var m = StrictProtectionMachine(); m.verified(at: now); m.failed(.network, now: now.addingTimeInterval(1))
+        return m.evaluate(grace: 0, now: now.addingTimeInterval(1)) == nil && m.needsNetworkRecovery
+    }
+    test("a confirmed violation still terminates immediately while holding for the network") {
+        var m = StrictProtectionMachine(); m.beginVerification("startup", now: now); _ = m.evaluate(grace: 12, now: now.addingTimeInterval(20))
+        let held = m.phase == .holding; let reason = m.violation("Claude 出口 IP 偏离已锁定的出口 IP")
+        return held && m.evaluate(grace: 12, now: now.addingTimeInterval(21)) == reason && m.phase == .tripped
+    }
+    test("losing the Clash control interface still terminates after the bounded window") {
+        var m = StrictProtectionMachine(); m.verified(at: now); m.routeUnavailable(now: now.addingTimeInterval(1))
+        let early = m.evaluate(grace: 12, now: now.addingTimeInterval(12)); let late = m.evaluate(grace: 12, now: now.addingTimeInterval(13))
+        return early == nil && late?.contains("无法核对 Claude 实际路由") == true && m.phase == .tripped
+    }
+    test("Clash returning restarts the route window and a fresh proof clears the network hold") {
+        var m = StrictProtectionMachine(); m.verified(at: now); m.routeUnavailable(now: now.addingTimeInterval(1)); m.routeAvailable()
+        let noTrip = m.evaluate(grace: 12, now: now.addingTimeInterval(30)) == nil && m.needsNetworkRecovery
+        m.verified(at: now.addingTimeInterval(31))
+        return noTrip && !m.needsNetworkRecovery && m.phase == .armed && m.routeUnknownSince == nil
+    }
+    test("sleep clears a pending network hold so wake starts a fresh window") {
+        var m = StrictProtectionMachine(); m.beginVerification("startup", now: now); _ = m.evaluate(grace: 12, now: now.addingTimeInterval(20)); m.sleep()
+        m.beginVerification("wake", now: now.addingTimeInterval(100))
+        return !m.needsNetworkRecovery && m.evaluate(grace: 12, now: now.addingTimeInterval(105)) == nil && !m.needsNetworkRecovery
+    }
     test("primary 1 MB upload seconds are recorded unscaled") {
         let r = try DiagnosticRunner.run(candidate: "A", settings: options, kind: .full, transport: v3Transport).measurement
         return r.success && r.uploadSeconds == 1 && !r.stages.contains { $0.endpoint == .bingoUpload }

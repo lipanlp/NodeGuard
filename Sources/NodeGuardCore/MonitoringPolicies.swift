@@ -55,34 +55,50 @@ public enum UploadRecoveryEvidence {
 }
 
 public enum ProtectionPhase: String, Codable {
-    case disabled, verifying, armed, unverified, tripped, sleeping
-    public var title: String { switch self { case .disabled: return "未武装"; case .verifying: return "正在复验"; case .armed: return "严格保护已武装"; case .unverified: return "暂时无法验证"; case .tripped: return "保护已触发"; case .sleeping: return "睡眠暂停，唤醒后复验" } }
+    case disabled, verifying, armed, unverified, holding, tripped, sleeping
+    public var title: String { switch self { case .disabled: return "未武装"; case .verifying: return "正在复验"; case .armed: return "严格保护已武装"; case .unverified: return "暂时无法验证"; case .holding: return "出口不通，保留 Claude"; case .tripped: return "保护已触发"; case .sleeping: return "睡眠暂停，唤醒后复验" } }
 }
+/// Terminates Claude only on positive evidence (changed IP, mainland exit, route bypass) or when the
+/// Clash route itself cannot be inspected. Exit probes that merely fail keep Claude running and ask
+/// for a front-node recovery: Claude traffic follows the same broken chain and cannot leak.
 public struct StrictProtectionMachine {
     public private(set) var phase: ProtectionPhase = .disabled
     public private(set) var reason = "严格保护未开启"
     public private(set) var lastVerified: Date?
     public private(set) var unknownSince: Date?
+    public private(set) var routeUnknownSince: Date?
+    public private(set) var needsNetworkRecovery = false
     public init() {}
     public mutating func disable() { self = StrictProtectionMachine() }
     public mutating func beginVerification(_ reason: String, now: Date = Date()) {
-        if phase == .sleeping { unknownSince = nil }
+        if phase == .sleeping { unknownSince = nil; needsNetworkRecovery = false }
         lastVerified = nil; if unknownSince == nil { unknownSince = now }
         phase = .verifying; self.reason = reason
     }
-    public mutating func sleep() { phase = .sleeping; reason = "电脑睡眠中，停止检测负载"; lastVerified = nil; unknownSince = nil }
-    public mutating func verified(at date: Date) { phase = .armed; lastVerified = date; unknownSince = nil; reason = "锁定出口与真实路由已复验" }
+    public mutating func sleep() { phase = .sleeping; reason = "电脑睡眠中，停止检测负载"; lastVerified = nil; unknownSince = nil; routeUnknownSince = nil; needsNetworkRecovery = false }
+    public mutating func verified(at date: Date) { phase = .armed; lastVerified = date; unknownSince = nil; routeUnknownSince = nil; needsNetworkRecovery = false; reason = "锁定出口与真实路由已复验" }
     public mutating func failed(_ kind: ProbeFailureKind, now: Date = Date()) {
         if unknownSince == nil { unknownSince = now }
+        guard !needsNetworkRecovery else { return }
         phase = .unverified; reason = kind == .local ? "本地探测错误，正在更换源端口复试" : "出口暂时无法验证，正在有时限复验"
     }
+    // The Clash control interface is the only view of Claude's real connections; losing it may mean TUN is gone.
+    public mutating func routeUnavailable(now: Date = Date()) {
+        if routeUnknownSince == nil { routeUnknownSince = now }
+        phase = .unverified; reason = "Clash 控制接口不可用，无法核对 Claude 实际路由"
+    }
+    public mutating func routeAvailable() { routeUnknownSince = nil }
     public mutating func violation(_ message: String) -> String { phase = .tripped; reason = message; return message }
     public mutating func evaluate(grace: Double, now: Date = Date()) -> String? {
         guard phase != .disabled && phase != .sleeping else { return nil }
         if phase == .tripped { return reason }
+        if let since = routeUnknownSince, now.timeIntervalSince(since) >= grace { return violation("连续 \(Int(grace)) 秒无法核对 Claude 实际路由，按严格保护策略退出 Claude") }
         if unknownSince == nil, let proof = lastVerified, now.timeIntervalSince(proof) <= 15 { return nil }
         if unknownSince == nil { unknownSince = lastVerified?.addingTimeInterval(15) ?? now; phase = .unverified; reason = "出口证据过期，正在重新验证" }
-        if now.timeIntervalSince(unknownSince!) >= grace { return violation("连续 \(Int(grace)) 秒无法验证锁定出口，按严格保护策略退出 Claude") }
+        if now.timeIntervalSince(unknownSince!) >= grace {
+            needsNetworkRecovery = true
+            if routeUnknownSince == nil { phase = .holding; reason = "出口连续 \(Int(grace)) 秒不通，路由与锁定 IP 未见异常；保留 Claude，更换前置后重试" }
+        }
         return nil
     }
 }

@@ -349,6 +349,9 @@ private struct RuntimePoll {
         lastTickDate = Date()
         if Date().timeIntervalSince(lastPermissionRefresh) >= 60 { refreshPermissions() }
         if settings.strictProtection, let reason = strictMachine.evaluate(grace: settings.unverifiedGrace) { trip(reason) }; syncProtection()
+        if settings.strictProtection && strictMachine.needsNetworkRecovery {
+            if issues["network-hold"] == nil { issue("network-hold", settings.autoSwitch ? "Claude 出口持续不通但未见 IP 或路由异常，保留 Claude，正在更换前置重试" : "Claude 出口持续不通但未见 IP 或路由异常，保留 Claude；自动切换未开启，请手动更换前置") }
+        } else if issues["network-hold"] != nil { clear("network-hold") }
         if !networkAvailable { return }
         if testing && purpose != "recovery" && Date().timeIntervalSince(lastLoadDate) > 6 { activeCancellation?.cancel("网络状态采样过期，先让行") }
         if !fastBusy {
@@ -367,7 +370,7 @@ private struct RuntimePoll {
                 switch result {
                 case .success(let sample):
                     let value = sample.snapshot
-                    snapshot = value; if !connected { connected = true }; clear("clash")
+                    snapshot = value; if !connected { connected = true }; clear("clash"); if settings.strictProtection { strictMachine.routeAvailable() }
                     acceptInventory(sample.inventory)
                     observeFrontSelection()
                     switchQuiet = switchQuietGate.sample(value, ownPorts: sample.ownPorts)
@@ -383,7 +386,7 @@ private struct RuntimePoll {
                     if value.proxies[settings.frontGroup]?.type != "Selector" { issue("selector", "前置节点组不是手动 Selector，自动切换已暂停") } else { clear("selector") }
                     refreshDerived(); if windowVisible { viewRevision &+= 1 }; refreshScanStatus(); considerBestNode(); maintainBackups(); advanceScan()
                 case .failure:
-                    connected = false; inventoryStable = false; activeCancellation?.cancel("Clash 已断开"); activityGate.reset(); load = nil; refreshScanStatus(); activity = "Clash Verge 未连接"; issue("clash", "Clash 控制接口断开，暂时无法确认代理路线"); if settings.strictProtection { strictMachine.failed(.local); syncProtection() }
+                    connected = false; inventoryStable = false; activeCancellation?.cancel("Clash 已断开"); activityGate.reset(); load = nil; refreshScanStatus(); activity = "Clash Verge 未连接"; issue("clash", "Clash 控制接口断开，暂时无法确认代理路线"); if settings.strictProtection { strictMachine.routeUnavailable(); syncProtection() }
                 }
                 onStatusChange?()
             }
@@ -392,8 +395,11 @@ private struct RuntimePoll {
         if !exitBusy && Date().timeIntervalSince(lastExitStart) >= interval, let current = snapshot, connected {
             lastExitStart = Date(); probeExits(current)
         }
+        let exitDown = claudeFailures >= 2 || (settings.strictProtection && strictMachine.needsNetworkRecovery)
+        // A dead exit outranks background scans; free the probe slot for recovery.
+        if settings.autoSwitch && exitDown && testing && purpose != "recovery" && Date().timeIntervalSince(lastRecoveryAttempt) >= 60 { activeCancellation?.cancel("出口不通，先更换前置恢复") }
         if settings.autoSwitch && !testing && connected && inventoryStable {
-            if claudeFailures >= 2 && Date().timeIntervalSince(lastRecoveryAttempt) >= 60 { recover(hard: true) }
+            if exitDown && Date().timeIntervalSince(lastRecoveryAttempt) >= 60 { recover(hard: true) }
             else if badUploadCount >= 2 && Date().timeIntervalSince(lastRecoveryAttempt) >= 60 { recover(hard: false) }
             else if Date().timeIntervalSince(lastSpeedStart) >= settings.slowCheckInterval && workloadAllowsTests { checkUpload() }
         }
@@ -494,7 +500,7 @@ private struct RuntimePoll {
             showError("先锁定当前出口 IP，并完成一次最新的正常出口验证，再开启严格保护。"); checkNow(); return
         }
         let alert = NSAlert(); alert.messageText = "开启 Claude 严格保护？"
-        alert.informativeText = "确认出口 IP 改变、回到国内或无法确认实际出口路由时强制结束 Claude 桌面端；暂时无法验证时最多复验 \(Int(settings.unverifiedGrace)) 秒后退出。启动和唤醒也会重新取证，期间界面显示正在复验。未保存内容可能丢失。锁定 IP 不会自动更新，不限制运营商。Claude Code 和终端不纳入。检测有秒级间隔，不能保证零泄漏。"
+        alert.informativeText = "确认出口 IP 改变、回到国内或实际路由绕行时强制结束 Claude 桌面端；Clash 控制接口不可用、无法核对路由时最多复验 \(Int(settings.unverifiedGrace)) 秒后退出。出口仅仅不通时保留 Claude，并在自动切换开启时更换前置重试。启动和唤醒也会重新取证，期间界面显示正在复验。未保存内容可能丢失。锁定 IP 不会自动更新，不限制运营商。Claude Code 和终端不纳入。检测有秒级间隔，不能保证零泄漏。"
         alert.addButton(withTitle: "开启强制退出保护"); alert.addButton(withTitle: "取消")
         Task {
             if await confirm(alert) {

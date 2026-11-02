@@ -72,7 +72,9 @@ func runV42Cases() {
     }
     test("unverified strict deadline remains twelve seconds rather than being weakened to hide probe alerts") {
         let now = Date(); var machine = StrictProtectionMachine(); machine.verified(at: now); machine.failed(.timeout, now: now)
-        return machine.evaluate(grace: 12, now: now.addingTimeInterval(11)) == nil && machine.evaluate(grace: 12, now: now.addingTimeInterval(12)) != nil
+        _ = machine.evaluate(grace: 12, now: now.addingTimeInterval(11)); let early = machine.needsNetworkRecovery
+        _ = machine.evaluate(grace: 12, now: now.addingTimeInterval(12))
+        return !early && machine.needsNetworkRecovery && machine.phase == .holding
     }
     if let i = CommandLine.arguments.firstIndex(of: "--cancel-proxy-port"), CommandLine.arguments.count > i + 1, let port = Int(CommandLine.arguments[i + 1]) {
         test("connection deadline is forwarded to real curl instead of being capped at the old fixed budget") {

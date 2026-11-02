@@ -200,11 +200,11 @@ struct GuardView: View {
                     VStack(alignment: .leading, spacing: 15) {
                         Label("Claude 出口保护", systemImage: "shield.lefthalf.filled").font(.headline)
                         LabeledContent("锁定 IP", value: model.settings.allowedClaudeIPs.joined(separator: ", ").isEmpty ? "尚未锁定" : model.settings.allowedClaudeIPs.joined(separator: ", "))
-                        Toggle("启用严格保护：异常或无法验证时强制结束 Claude", isOn: Binding(get: { model.settings.strictProtection }, set: { model.toggleStrict($0) }))
-                        Text("仅核对 Claude 服务域名的出口；内置浏览器访问第三方网站不因普通分流强退。Claude Code 和终端不纳入。确认 IP 改变或路由绕行立即退出；临时无法验证按下方时限复验，锁定 IP 不自动更新。")
+                        Toggle("启用严格保护：出口 IP 改变、回到国内或路由绕行时强制结束 Claude", isOn: Binding(get: { model.settings.strictProtection }, set: { model.toggleStrict($0) }))
+                        Text("仅核对 Claude 服务域名的出口；内置浏览器访问第三方网站不因普通分流强退。Claude Code 和终端不纳入。确认 IP 改变或路由绕行立即退出；出口仅仅不通时保留 Claude 并更换前置重试；Clash 控制接口不可用时按下方时限复验后退出。锁定 IP 不自动更新。")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                         Text("状态：\(model.protectionPhase.title) · \(model.protectionReason)").foregroundStyle(model.protectionPhase == .armed ? Color.teal : Color.orange).font(.system(size: 11))
-                        Picker("暂时无法验证时", selection: Binding(get: { model.settings.unverifiedGrace }, set: { value in model.changeSettings { $0.unverifiedGrace = value } })) {
+                        Picker("无法核对路由时", selection: Binding(get: { model.settings.unverifiedGrace }, set: { value in model.changeSettings { $0.unverifiedGrace = value } })) {
                             Text("立即退出（最严格）").tag(0.0); Text("复验最多 12 秒后退出").tag(12.0); Text("复验最多 20 秒后退出").tag(20.0)
                         }.disabled(model.settings.strictProtection)
                         Button(model.enrolling ? "正在核对…" : "重新锁定当前出口 IP") { model.enrollCurrentExit() }.disabled(model.enrolling || model.settings.strictProtection)

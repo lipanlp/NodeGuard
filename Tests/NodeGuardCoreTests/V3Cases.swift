@@ -180,22 +180,24 @@ func runV3Cases() {
         let quality = v3Record("B", date: now); let health = v3Record("B", kind: .health, date: now.addingTimeInterval(-31))
         return try !FailoverPolicy.mayCommit(settings: s, snapshot: fixture(), old: "A", quality: quality, health: health, now: now)
     }
-    test("strict startup verifies first but cannot wait indefinitely for evidence") {
+    test("strict startup without exit evidence holds Claude and requests recovery after the bounded window") {
         var m = StrictProtectionMachine(); m.beginVerification("startup", now: fixed)
-        let a = m.evaluate(grace: 12, now: fixed.addingTimeInterval(11)); let b = m.evaluate(grace: 12, now: fixed.addingTimeInterval(12))
-        return a == nil && b != nil && m.phase == .tripped
+        let a = m.evaluate(grace: 12, now: fixed.addingTimeInterval(11)); let early = m.needsNetworkRecovery
+        let b = m.evaluate(grace: 12, now: fixed.addingTimeInterval(12))
+        return a == nil && !early && b == nil && m.needsNetworkRecovery && m.phase == .holding
     }
     test("confirmed IP or route violation triggers during verification without waiting") {
         var m = StrictProtectionMachine(); m.beginVerification("startup", now: fixed); let reason = m.violation("confirmed mismatch")
         return reason == "confirmed mismatch" && m.evaluate(grace: 20, now: fixed) == reason
     }
-    test("a local probe error receives only the bounded verification window") {
+    test("a local probe error receives only the bounded verification window before recovery") {
         var m = StrictProtectionMachine(); m.verified(at: fixed); m.failed(.local, now: fixed.addingTimeInterval(1))
-        return m.evaluate(grace: 12, now: fixed.addingTimeInterval(2)) == nil && m.evaluate(grace: 12, now: fixed.addingTimeInterval(13)) != nil
+        _ = m.evaluate(grace: 12, now: fixed.addingTimeInterval(2)); let early = m.needsNetworkRecovery
+        return !early && m.evaluate(grace: 12, now: fixed.addingTimeInterval(13)) == nil && m.needsNetworkRecovery && m.phase != .tripped
     }
     test("repeated network changes cannot reset the unknown deadline forever") {
         var m = StrictProtectionMachine(); m.beginVerification("change1", now: fixed); m.beginVerification("change2", now: fixed.addingTimeInterval(8))
-        return m.evaluate(grace: 12, now: fixed.addingTimeInterval(12)) != nil
+        return m.evaluate(grace: 12, now: fixed.addingTimeInterval(12)) == nil && m.needsNetworkRecovery
     }
     test("sleep suspends stale evidence; wake obtains a new bounded window") {
         var m = StrictProtectionMachine(); m.verified(at: fixed); m.sleep(); let asleep = m.evaluate(grace: 12, now: fixed.addingTimeInterval(10000))
