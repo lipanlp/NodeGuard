@@ -1,0 +1,35 @@
+#!/bin/bash
+set -euo pipefail
+TASK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TASK_SDK="$(xcrun --show-sdk-path)"
+TASK_ARCH="${NODEGUARD_ARCH:-$(uname -m)}"
+TASK_BUILD="$TASK_ROOT/work/build-$TASK_ARCH"
+TASK_TARGET="$TASK_ARCH-apple-macosx13.0"
+mkdir -p "$TASK_BUILD" "$TASK_ROOT/outputs"
+TASK_CYAML="$TASK_ROOT/Vendor/Yams/Sources/CYaml"
+for source in "$TASK_CYAML"/src/*.c; do
+    object="$TASK_BUILD/yaml-$(basename "${source%.c}").o"
+    xcrun clang -target "$TASK_TARGET" -isysroot "$TASK_SDK" -O2 -DYAML_DECLARE_STATIC -I "$TASK_CYAML/include" -c "$source" -o "$object"
+done
+xcrun ar rcs "$TASK_BUILD/libCYaml.a" "$TASK_BUILD"/yaml-*.o
+xcrun clang -target "$TASK_TARGET" -isysroot "$TASK_SDK" -O2 -I "$TASK_ROOT/Sources/CProcess/include" -c "$TASK_ROOT/Sources/CProcess/CProcess.c" -o "$TASK_BUILD/CProcess.o"
+xcrun ar rcs "$TASK_BUILD/libCProcess.a" "$TASK_BUILD/CProcess.o"
+TASK_FLAGS=(-sdk "$TASK_SDK" -target "$TASK_TARGET" -O -whole-module-optimization -D SWIFT_PACKAGE -Xcc -DYAML_DECLARE_STATIC -I "$TASK_BUILD" -I "$TASK_CYAML/include" -I "$TASK_ROOT/Sources/CProcess/include")
+xcrun swiftc "${TASK_FLAGS[@]}" -parse-as-library -emit-module -emit-library -static -module-name Yams -emit-module-path "$TASK_BUILD/Yams.swiftmodule" "$TASK_ROOT"/Vendor/Yams/Sources/Yams/*.swift -o "$TASK_BUILD/libYams.a"
+xcrun swiftc "${TASK_FLAGS[@]}" -parse-as-library -emit-module -emit-library -static -module-name NodeGuardCore -emit-module-path "$TASK_BUILD/NodeGuardCore.swiftmodule" "$TASK_ROOT"/Sources/NodeGuardCore/*.swift -o "$TASK_BUILD/libNodeGuardCore.a"
+xcrun swiftc "${TASK_FLAGS[@]}" -L "$TASK_BUILD" -lNodeGuardCore -lYams -lCYaml -lCProcess "$TASK_ROOT"/Sources/NodeGuard/*.swift -Xlinker -dead_strip -o "$TASK_BUILD/NodeGuard"
+TASK_APP="$TASK_ROOT/outputs/NodeGuard.app"
+mkdir -p "$TASK_APP/Contents/MacOS" "$TASK_APP/Contents/Resources"
+cp "$TASK_BUILD/NodeGuard" "$TASK_APP/Contents/MacOS/NodeGuard.new"
+xcrun strip -x "$TASK_APP/Contents/MacOS/NodeGuard.new"
+mv -f "$TASK_APP/Contents/MacOS/NodeGuard.new" "$TASK_APP/Contents/MacOS/NodeGuard"
+cp "$TASK_ROOT/scripts/Info.plist" "$TASK_APP/Contents/Info.plist"
+xcrun swiftc -sdk "$TASK_SDK" -target "$TASK_TARGET" "$TASK_ROOT/scripts/create-icon.swift" -o "$TASK_BUILD/create-icon"
+"$TASK_BUILD/create-icon" "$TASK_BUILD/NodeGuard.iconset"
+iconutil -c icns "$TASK_BUILD/NodeGuard.iconset" -o "$TASK_APP/Contents/Resources/NodeGuard.icns"
+cp "$TASK_ROOT/Vendor/Yams/LICENSE" "$TASK_APP/Contents/Resources/Yams-LICENSE.txt"
+cp "$TASK_ROOT/Vendor/Yams/LIBYAML-LICENSE" "$TASK_APP/Contents/Resources/LibYAML-LICENSE.txt"
+cp "$TASK_ROOT/LICENSE" "$TASK_APP/Contents/Resources/NodeGuard-LICENSE.txt"
+cp "$TASK_ROOT/docs/THIRD-PARTY.md" "$TASK_APP/Contents/Resources/THIRD-PARTY.txt"
+codesign --force --sign - "$TASK_APP"
+printf 'Built %s\n' "$TASK_APP"
