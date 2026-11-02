@@ -801,7 +801,7 @@ private struct RuntimePoll {
         }
         if let common = SharedFailureDetector.assess(history, inventory: state.inventoryKey) {
             sharedDiagnosis = common.title; issue("shared", common.title)
-            if copy.kind != .health && copy.performanceDeferred != true && common.key != "speed-service" && state.performanceRetryAt.map({ $0 > Date() }) != true { state.performanceRetryAt = Date().addingTimeInterval(300) }
+            if copy.kind != .health && copy.performanceDeferred != true && common.defersPerformance && state.performanceRetryAt.map({ $0 > Date() }) != true { state.performanceRetryAt = Date().addingTimeInterval(300) }
         } else { sharedDiagnosis = nil; clear("shared") }
         refreshDerived(force: true); save()
     }

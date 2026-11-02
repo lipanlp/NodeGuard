@@ -80,6 +80,14 @@ public enum DiagnosticEndpoint: String, Codable {
     }
     public var title: String { switch self { case .bingoUpload, .bingoDownload: return "HTTPBingo 备用端点"; case .bingoStream: return "HTTPBingo 流式端点"; case .claudeTrace: return "Claude"; case .gptTrace: return "GPT"; default: return "Cloudflare" } }
     public var isTrace: Bool { [.cloudflareTrace, .claudeTrace, .gptTrace].contains(self) }
+    // HTTPBingo rejects request bodies above roughly 512 KiB with HTTP 500/400, so a 1 MB fallback could never pass.
+    public static let fallbackUploadBytes = 500_000
+    // Scale only the payload phase to a 1 MB equivalent; the proxy and TLS setup is paid once either way.
+    public static func megabyteUploadSeconds(_ response: CurlResult, bytes: Int) -> Double {
+        guard bytes > 0, bytes < 1_000_000 else { return response.seconds }
+        let setup = min(response.seconds, response.metrics?.tlsSeconds ?? 0)
+        return setup + (response.seconds - setup) * 1_000_000 / Double(bytes)
+    }
 }
 public struct StageResult: Codable, Equatable, Identifiable {
     public var id: UUID = UUID()
@@ -154,12 +162,14 @@ public enum DiagnosticRunner {
                 var up = try attempt(.upload, DiagnosticRequest(.cloudflareUpload, uploadBytes: 1_000_000, timeout: 30)) { r in
                     guard (r.metrics?.uploadedBytes ?? r.transferred) >= 1_000_000 else { throw ProbeFailure(kind: .invalid, metrics: r.metrics, detail: "上传字节未完整确认") }
                 }
-                if up == nil {
-                    up = try attempt(.upload, DiagnosticRequest(.bingoUpload, uploadBytes: 1_000_000, timeout: 30)) { r in
-                        guard (r.metrics?.uploadedBytes ?? r.transferred) >= 1_000_000 else { throw ProbeFailure(kind: .invalid, metrics: r.metrics, detail: "备用上传未完整确认") }
-                    }
-                }
                 uploadSeconds = up?.seconds ?? 0
+                if up == nil {
+                    let bytes = DiagnosticEndpoint.fallbackUploadBytes
+                    up = try attempt(.upload, DiagnosticRequest(.bingoUpload, uploadBytes: bytes, timeout: 30)) { r in
+                        guard (r.metrics?.uploadedBytes ?? r.transferred) >= bytes else { throw ProbeFailure(kind: .invalid, metrics: r.metrics, detail: "备用上传未完整确认") }
+                    }
+                    uploadSeconds = up.map { DiagnosticEndpoint.megabyteUploadSeconds($0, bytes: bytes) } ?? 0
+                }
                 if kind == .full {
                     var bytes = 2_000_000
                     var down = try attempt(.download, DiagnosticRequest(.cloudflareDownload, timeout: 15)) { r in
@@ -195,8 +205,17 @@ public struct SharedFailure: Equatable {
     public let key: String
     public let title: String
     public let nodeCount: Int
+    // Only a suspected common exit fault pauses performance load for every other node.
+    public var defersPerformance: Bool { key == "residential" || key == "payload" }
 }
 public enum SharedFailureDetector {
+    // Names such as "中转线路2-台湾01" share one relay entry; flags and region suffixes are not independent evidence.
+    public static func lineGroup(_ name: String) -> String {
+        let cleaned = String(String.UnicodeScalarView(name.unicodeScalars.filter { !(0x1F1E6...0x1F1FF).contains($0.value) })).trimmingCharacters(in: .whitespaces)
+        guard let separator = cleaned.firstIndex(where: { $0 == "-" || $0 == "|" }) else { return name }
+        let prefix = cleaned[..<separator].trimmingCharacters(in: .whitespaces)
+        return prefix.isEmpty ? name : prefix
+    }
     public static func assess(_ records: [NodeMeasurement], inventory: String?, now: Date = Date()) -> SharedFailure? {
         let recent = records.filter { $0.inventoryKey == inventory && $0.kind != .health && $0.performanceDeferred != true && now.timeIntervalSince($0.date) >= 0 && now.timeIntervalSince($0.date) < 900 }.sorted { $0.date > $1.date }
         var seen = Set<String>(); let sample = recent.filter { seen.insert($0.name).inserted }.prefix(5)
@@ -204,7 +223,17 @@ public enum SharedFailureDetector {
         let nodes = sample.filter { $0.passed(.front) && !$0.passed(.residential) && !$0.stages.contains { $0.failureKind == .route } }
         if nodes.count >= 3 { return SharedFailure(key: "residential", title: "多个独立前置能连通，但出口链路共同失败；出口或其上游疑似异常", nodeCount: nodes.count) }
         let payload = sample.filter { $0.passed(.residential) && !$0.passed(.upload) && $0.stages.contains { $0.stage == .upload && $0.status == .failed } }
-        if payload.count >= 3 { return SharedFailure(key: "payload", title: "多个节点在大上传阶段共同失败；先排查共享出口与测速服务，性能负载暂缓 5 分钟", nodeCount: payload.count) }
+        if payload.count >= 3 {
+            let failedNames = Set(payload.map(\.name)); let firstFailure = payload.map(\.date).min() ?? now
+            // Another node completing the large upload after the failures began proves the shared exit and service still work.
+            let contradicted = recent.contains { !failedNames.contains($0.name) && $0.date >= firstFailure && $0.passed(.upload) }
+            let lines = Set(payload.map { lineGroup($0.name) })
+            if lines.count == 1, let line = lines.first, !failedNames.contains(line) {
+                let peers = contradicted ? "同期其他节点经同一出口通过" : "其他线路尚未同时失败"
+                return SharedFailure(key: "line", title: "「\(line)」的 \(payload.count) 个节点在大上传阶段失败，\(peers)；疑似该线路上游异常，不暂缓其他节点性能测试", nodeCount: payload.count)
+            }
+            if !contradicted { return SharedFailure(key: "payload", title: "多条线路的节点在大上传阶段共同失败；先排查共享出口与测速服务，性能负载暂缓 5 分钟", nodeCount: payload.count) }
+        }
         let endpoint = sample.filter { $0.stages.contains { $0.stage == .upload && $0.endpoint == .cloudflareUpload && $0.status == .failed } && $0.stages.contains { $0.stage == .upload && $0.endpoint == .bingoUpload && $0.status == .passed } }
         if endpoint.count >= 3 { return SharedFailure(key: "speed-service", title: "主测速端点多次失败，备用端点通过；主端点疑似异常", nodeCount: endpoint.count) }
         return nil

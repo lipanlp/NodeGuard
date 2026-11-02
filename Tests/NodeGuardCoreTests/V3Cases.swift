@@ -41,7 +41,7 @@ func runV3Cases() {
     }
     test("failed upload preserves successful front, exit, target and download evidence") {
         let r = try DiagnosticRunner.run(candidate: "A", settings: options, kind: .full) { request in
-            if request.uploadBytes == 1_000_000 { throw ProbeFailure(kind: .timeout, code: 28, detail: "等待响应") }; return v3Transport(request)
+            if request.uploadBytes >= DiagnosticEndpoint.fallbackUploadBytes { throw ProbeFailure(kind: .timeout, code: 28, detail: "等待响应") }; return v3Transport(request)
         }.measurement
         return !r.success && r.ip == options.allowedClaudeIPs.first && r.passed(.front) && r.passed(.residential) && r.passed(.claude) && r.downloadMbps > 0 && r.score > 0 && !r.isUsable(allowedIPs: options.allowedClaudeIPs, maxUpload: 15)
     }
