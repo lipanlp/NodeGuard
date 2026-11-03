@@ -191,6 +191,7 @@ private struct RuntimePoll {
         state.scanCheckpoint = queue.checkpoint
         if !demo && !readOnly { writer.flush(state) }
     }
+    func noteSignalQuit() { event("info", "收到退出信号（如升级替换），已保存状态后退出；重新启动后恢复保护") }
     func save() {
         guard !demo, !readOnly else { return }
         state.scanCheckpoint = queue.checkpoint ?? state.scanCheckpoint
@@ -304,7 +305,7 @@ private struct RuntimePoll {
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, let receiver = self else { return }
             Task { @MainActor in
-                do { let data = try DiagnosticExport.data(state: receiver.state, version: "0.4.2", connected: receiver.connected, network: receiver.networkStatus, protection: receiver.protectionPhase); try data.write(to: url, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path); receiver.event("info", "已导出脱敏诊断：不含密钥、原始配置、IP、节点名称或会话内容") }
+                do { let data = try DiagnosticExport.data(state: receiver.state, version: AppVersion.display, connected: receiver.connected, network: receiver.networkStatus, protection: receiver.protectionPhase); try data.write(to: url, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path); receiver.event("info", "已导出脱敏诊断：不含密钥、原始配置、IP、节点名称或会话内容") }
                 catch { receiver.showError("诊断导出失败，请选择可写入的位置。") }
             }
         }

@@ -49,7 +49,7 @@ struct GuardView: View {
                 Label(model.statusTitle, systemImage: model.hasIncident ? "exclamationmark.circle.fill" : "circle.fill")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(model.hasIncident ? .orange : .teal)
                 Text("Clash Verge 关联\n\(model.connected ? "控制接口已连接" : "等待 Clash 启动")").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(4)
-                Text("v0.4.2 · Apple Silicon").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("v\(AppVersion.display) · Apple Silicon").font(.system(size: 10)).foregroundStyle(.secondary)
             }.padding(.bottom, 12)
         }.padding(22).background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
     }

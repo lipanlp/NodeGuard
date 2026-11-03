@@ -6,8 +6,14 @@ import CryptoKit
 import NodeGuardCore
 import UserNotifications
 
+enum AppVersion {
+    static let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+    static let display = "\(short) (\(build))"
+}
+
 func diagnose(measure: Bool, candidate: String? = nil) -> Int32 {
-    var report: [String: Any] = ["version": "0.4.2", "date": ISO8601DateFormatter().string(from: Date()), "mode": measure ? "isolated-measurement" : "read-only", "global_selection_changed": false, "claude_terminated": false]
+    var report: [String: Any] = ["version": AppVersion.display, "date": ISO8601DateFormatter().string(from: Date()), "mode": measure ? "isolated-measurement" : "read-only", "global_selection_changed": false, "claude_terminated": false]
     func configHash() -> String { guard let data = try? Data(contentsOf: ClashFiles.configURL) else { return "unreadable" }; return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     let before = configHash()
     do {
@@ -45,6 +51,8 @@ func diagnose(measure: Bool, candidate: String? = nil) -> Int32 {
     private var notificationPresenter: NotificationPresenter?
     private var instanceFD: Int32 = -1
     private var lastStatus = ""
+    private var terminationSignal: DispatchSourceSignal?
+    private var signalQuit = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         let demo = CommandLine.arguments.contains("--demo")
         let readOnly = CommandLine.arguments.contains("--observe-only")
@@ -76,12 +84,24 @@ func diagnose(measure: Bool, candidate: String? = nil) -> Int32 {
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "退出", action: #selector(quit), keyEquivalent: "").target = self
         item.menu = statusMenu; updateStatus(); showWindow(); model.start()
+        installTerminationSignal()
     }
     private func claimInstance() -> Bool {
         let cache = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/NodeGuard")
         try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         instanceFD = Darwin.open(cache.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
         return instanceFD >= 0 && flock(instanceFD, LOCK_EX | LOCK_NB) == 0
+    }
+    // SIGTERM（升级替换、launchd、kill）走正常退出流程保存状态并停止候选核心，不弹确认框。
+    private func installTerminationSignal() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self = self, !self.signalQuit else { return }
+            self.signalQuit = true; self.model?.noteSignalQuit()
+            if let sheet = self.window.attachedSheet { self.window.endSheet(sheet, returnCode: .alertFirstButtonReturn) } else { NSApp.terminate(nil) }
+        }
+        source.resume(); terminationSignal = source
     }
     @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); model?.setWindowVisible(true) }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
@@ -103,7 +123,7 @@ func diagnose(measure: Bool, candidate: String? = nil) -> Int32 {
         button.toolTip = "节点哨兵 · \(model.statusTitle)"
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if model?.settings.strictProtection == true {
+        if model?.settings.strictProtection == true && !signalQuit {
             let alert = NSAlert(); alert.messageText = "退出后 Claude 将失去保护"; alert.informativeText = "严格保护设置会保留，下次启动继续生效。"; alert.addButton(withTitle: "退出"); alert.addButton(withTitle: "取消")
             guard window.attachedSheet == nil else { return .terminateCancel }
             showWindow()
@@ -119,7 +139,7 @@ func diagnose(measure: Bool, candidate: String? = nil) -> Int32 {
 @main struct NodeGuardApplication {
     @MainActor static func main() {
         if let index = CommandLine.arguments.firstIndex(of: "--export-diagnostics"), CommandLine.arguments.count > index + 1 {
-            do { let state = StateStore().load(); let connected = (try? MihomoClient().snapshot()) != nil; let data = try DiagnosticExport.data(state: state, version: "0.4.2", connected: connected, network: "其他", protection: state.settings.strictProtection ? .verifying : .disabled); let url = URL(fileURLWithPath: CommandLine.arguments[index + 1]); try data.write(to: url, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path); print("脱敏诊断已导出"); exit(0) } catch { print("诊断导出失败"); exit(1) }
+            do { let state = StateStore().load(); let connected = (try? MihomoClient().snapshot()) != nil; let data = try DiagnosticExport.data(state: state, version: AppVersion.display, connected: connected, network: "其他", protection: state.settings.strictProtection ? .verifying : .disabled); let url = URL(fileURLWithPath: CommandLine.arguments[index + 1]); try data.write(to: url, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path); print("脱敏诊断已导出"); exit(0) } catch { print("诊断导出失败"); exit(1) }
         }
         if CommandLine.arguments.contains("--diagnose") || CommandLine.arguments.contains("--measure-current") || CommandLine.arguments.contains("--measure-node") {
             let index = CommandLine.arguments.firstIndex(of: "--measure-node")
