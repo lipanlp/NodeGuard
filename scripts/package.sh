@@ -17,11 +17,12 @@ cat > "$TASK_STAGE/dmg/拖动安装说明.txt" <<'EOF'
 
 默认自动测试当前订阅全部前置节点，每轮结束后间隔 6 小时。
 低负载稳定 15 秒后串行测试，忽略后台心跳和零星请求；持续大流量时让行，稍后继续。
-新版修复 Claude 内置浏览器访问普通网站误触发强退；锁定当前出口 IP，保留 Claude 服务保护。
+锁定当前出口 IP，保留 Claude 服务保护；Claude 内置浏览器访问普通网站不会触发强退。
 关闭或重启程序后续测未完成队列；换网与唤醒后重新验证出口。
 
 自动切换和 Claude 强制退出仍保留原有开关，不会随安装自动开启。
-严格保护确认出口变化立即处理；暂时无法验证默认复验最多 12 秒后退出，可在未武装时调整。
+严格保护只在确认出口 IP 改变、回到国内、路由绕行或 Clash 控制接口持续不可用时结束 Claude；出口仅仅不通时保留 Claude 并更换前置重试。
+出口单次探测失败不告警，连续 2 次未通过才通知。
 系统通知需 macOS 授权；新版修复前台静默，自检会显示点击反馈和通知中心回执。
 EOF
 for name in Package.swift README.md CHANGELOG.md CONTRIBUTING.md LICENSE AGENTS.md .gitignore Sources Tests Vendor scripts docs; do
