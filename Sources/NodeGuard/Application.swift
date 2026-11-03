@@ -103,12 +103,13 @@ func diagnose(measure: Bool, candidate: String? = nil) -> Int32 {
         }
         source.resume(); terminationSignal = source
     }
-    @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); model?.setWindowVisible(true) }
+    // 窗口打开时显示 Dock 图标；关闭后只保留菜单栏入口，监控继续运行。
+    @objc func showWindow() { NSApp.setActivationPolicy(.regular); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); model?.setWindowVisible(true) }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
     @objc func check() { model.checkNow() }
     @objc func pause() { model.setPaused(!model.paused) }
     @objc func quit() { NSApp.terminate(nil) }
-    func windowWillClose(_ notification: Notification) { model?.setWindowVisible(false) }
+    func windowWillClose(_ notification: Notification) { model?.setWindowVisible(false); NSApp.setActivationPolicy(.accessory) }
     func windowDidMiniaturize(_ notification: Notification) { model?.setWindowVisible(false) }
     func windowDidDeminiaturize(_ notification: Notification) { model?.setWindowVisible(true) }
     func windowDidChangeOcclusionState(_ notification: Notification) { model?.setWindowVisible(window.isVisible && window.occlusionState.contains(.visible)) }

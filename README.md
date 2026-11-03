@@ -1,4 +1,4 @@
-# 节点哨兵 NodeGuard 0.4.3
+# 节点哨兵 NodeGuard 0.4.4
 
 与 Clash Verge Rev 配合使用的 macOS 原生应用：监控 Claude/GPT 出口、自动恢复前置线路、保护 Claude 桌面端，并在网络空闲时测试当前订阅的全部前置节点。
 
@@ -8,9 +8,9 @@ Native macOS monitoring, failover and Claude service egress protection for Clash
 
 ## 拖动安装
 
-从 [Releases](https://github.com/lipanlp/NodeGuard/releases/latest) 下载并打开 `NodeGuard-0.4.3-macOS-arm64.dmg`，将 NodeGuard.app 拖到旁边的 Applications 文件夹。若旧版已运行，先退出旧版，再从“应用程序”打开节点哨兵。用户设置保留，不用重新导入 Clash 配置。
+从 [Releases](https://github.com/lipanlp/NodeGuard/releases/latest) 下载并打开 `NodeGuard-0.4.4-macOS-arm64.dmg`，将 NodeGuard.app 拖到旁边的 Applications 文件夹。若旧版已运行，先退出旧版，再从“应用程序”打开节点哨兵。用户设置保留，不用重新导入 Clash 配置。
 
-新版有独立 Dock 图标，也保留菜单栏入口。关闭窗口后继续监控；点击 Dock 图标重新打开窗口。退出应用会停止所有监控和自动化。启用严格保护时，菜单或 ⌘Q 退出需确认；脚本升级替换可发送 SIGTERM，应用会保存状态、停止候选核心后直接退出，并在事件中记录。窗口底部显示「版本 (构建号)」。
+窗口打开时显示 Dock 图标；关闭窗口后 Dock 图标隐藏，只保留顶部菜单栏入口，监控继续运行，从菜单栏「打开节点哨兵」重新打开窗口。退出应用会停止所有监控和自动化。启用严格保护时，菜单或 ⌘Q 退出需确认；脚本升级替换可发送 SIGTERM，应用会保存状态、停止候选核心后直接退出，并在事件中记录。窗口底部显示「版本 (构建号)」。
 
 新安装默认启用监控和空闲全量测速。自动切换、Claude 强制退出和登录启动保留原设置，新用户默认关闭；本次升级不会自行武装保护或改动代理选择。
 
