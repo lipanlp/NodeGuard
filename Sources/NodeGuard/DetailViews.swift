@@ -123,7 +123,7 @@ struct IncidentListView: View {
             if records.isEmpty { Text(showResolved ? "尚无恢复记录" : "当前没有未恢复的事件").foregroundStyle(.secondary) }
             ForEach(records) { r in
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack { Label(r.resolvedAt == nil ? (r.level == "critical" ? "严重事件" : "待处理") : (r.resolutionReason == "contextChanged" ? "上下文已变化" : "已恢复"), systemImage: r.resolvedAt == nil ? "exclamationmark.circle" : "checkmark.circle").foregroundStyle(r.resolvedAt == nil ? Color.orange : Color.teal); Spacer(); Text("观察 \(r.count) 次").foregroundStyle(.secondary) }
+                    HStack { Label(r.resolvedAt == nil ? (r.level == "critical" ? "严重事件" : "待处理") : (r.resolutionReason == "contextChanged" ? "上下文已变化" : (r.resolutionReason == "unobserved" ? "未确认恢复" : "已恢复")), systemImage: r.resolvedAt == nil ? "exclamationmark.circle" : "checkmark.circle").foregroundStyle(r.resolvedAt == nil ? Color.orange : Color.teal); Spacer(); Text("观察 \(r.count) 次").foregroundStyle(.secondary) }
                     Text(r.message).textSelection(.enabled)
                     if let front = r.frontName { Text("发生时前置：" + front).font(.caption).foregroundStyle(.secondary) }
                     Text("开始 \(r.firstSeen.formatted(date: .abbreviated, time: .standard)) · \(r.resolvedAt == nil ? "最近" : "恢复") \((r.resolvedAt ?? r.lastSeen).formatted(date: .omitted, time: .standard)) · 持续 \(max(0, Int((r.resolvedAt ?? Date()).timeIntervalSince(r.firstSeen)))) 秒").font(.caption).foregroundStyle(.secondary)

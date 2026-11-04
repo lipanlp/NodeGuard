@@ -216,6 +216,13 @@ public struct FullScanQueue {
         inventory = value; pending = checkpoint.pending; completed = checkpoint.completed; total = checkpoint.total; nextRound = checkpoint.nextRound; return true
     }
     public mutating func retryEarlier(at date: Date) { if pending.isEmpty { nextRound = min(nextRound ?? date, date) } }
+    public static func activeRetry(_ retry: Date?, now: Date = Date()) -> Date? { retry.flatMap { $0 > now ? $0 : nil } }
+    // A deferred round earns one early retry. An expired deadline is consumed here, otherwise every later round would restart 15 seconds after it ends.
+    public mutating func finishRound(performanceRetry retry: Date?, now: Date = Date()) -> Date? {
+        guard let retry = retry else { return nil }
+        retryEarlier(at: max(now.addingTimeInterval(15), retry))
+        return Self.activeRetry(retry, now: now)
+    }
     public mutating func finish(node: String, inventoryKey: String, interval: Double, now: Date = Date()) {
         guard inventory?.key == inventoryKey, let index = pending.firstIndex(of: node) else { return }
         pending.remove(at: index); completed += 1

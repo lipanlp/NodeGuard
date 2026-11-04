@@ -207,7 +207,9 @@ public struct SharedFailure: Equatable {
     public let nodeCount: Int
     // Only a suspected common exit fault pauses performance load for every other node.
     public var defersPerformance: Bool { key == "residential" || key == "payload" }
+    public var line: String? = nil
 }
+public enum LineAlertStatus: Equatable { case failing, recovered, unobserved }
 public enum SharedFailureDetector {
     // Names such as "中转线路2-台湾01" share one relay entry; flags and region suffixes are not independent evidence.
     public static func lineGroup(_ name: String) -> String {
@@ -215,6 +217,18 @@ public enum SharedFailureDetector {
         guard let separator = cleaned.firstIndex(where: { $0 == "-" || $0 == "|" }) else { return name }
         let prefix = cleaned[..<separator].trimmingCharacters(in: .whitespaces)
         return prefix.isEmpty ? name : prefix
+    }
+    public static let lineRecoveryPasses = 2
+    public static func lineIncidentKey(_ line: String) -> String { "line:" + line }
+    public static func line(fromIncidentKey key: String) -> String? { key.hasPrefix("line:") ? String(key.dropFirst(5)) : nil }
+    // The rolling sample in `assess` moves on as a scan leaves a line, which says nothing about the line itself: only its own nodes passing the large upload again count as recovery.
+    public static func lineStatus(_ records: [NodeMeasurement], line: String, since: Date, inventory: String?, now: Date = Date()) -> LineAlertStatus {
+        var seen = Set<String>()
+        let results = records.filter { $0.inventoryKey == inventory && now.timeIntervalSince($0.date) >= 0 && now.timeIntervalSince($0.date) < 900 && lineGroup($0.name) == line && $0.stages.contains { $0.stage == .upload && $0.status != .deferred } }
+            .sorted { $0.date > $1.date }.filter { seen.insert($0.name).inserted }
+        guard !results.isEmpty else { return .unobserved }
+        let latest = results.prefix(lineRecoveryPasses)
+        return latest.count == lineRecoveryPasses && latest.allSatisfy({ $0.date >= since && $0.passed(.upload) }) ? .recovered : .failing
     }
     public static func assess(_ records: [NodeMeasurement], inventory: String?, now: Date = Date()) -> SharedFailure? {
         let recent = records.filter { $0.inventoryKey == inventory && $0.kind != .health && $0.performanceDeferred != true && now.timeIntervalSince($0.date) >= 0 && now.timeIntervalSince($0.date) < 900 }.sorted { $0.date > $1.date }
@@ -230,7 +244,7 @@ public enum SharedFailureDetector {
             let lines = Set(payload.map { lineGroup($0.name) })
             if lines.count == 1, let line = lines.first, !failedNames.contains(line) {
                 let peers = contradicted ? "同期其他节点经同一出口通过" : "其他线路尚未同时失败"
-                return SharedFailure(key: "line", title: "「\(line)」的 \(payload.count) 个节点在大上传阶段失败，\(peers)；疑似该线路上游异常，不暂缓其他节点性能测试", nodeCount: payload.count)
+                return SharedFailure(key: "line", title: "「\(line)」的 \(payload.count) 个节点在大上传阶段失败，\(peers)；疑似该线路上游异常，不暂缓其他节点性能测试", nodeCount: payload.count, line: line)
             }
             if !contradicted { return SharedFailure(key: "payload", title: "多条线路的节点在大上传阶段共同失败；先排查共享出口与测速服务，性能负载暂缓 5 分钟", nodeCount: payload.count) }
         }

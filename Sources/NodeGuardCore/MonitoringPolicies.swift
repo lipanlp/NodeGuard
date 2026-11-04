@@ -154,8 +154,11 @@ public enum IncidentLedger {
         open(); return .opened
     }
     public static func resolve(_ records: inout [GuardIncident], key: String, now: Date = Date()) -> GuardIncident? {
+        close(&records, key: key, reason: "verified", now: now)
+    }
+    @discardableResult public static func close(_ records: inout [GuardIncident], key: String, reason: String, now: Date = Date()) -> GuardIncident? {
         guard let i = records.firstIndex(where: { $0.key == key && $0.resolvedAt == nil }) else { return nil }
-        records[i].resolvedAt = now; records[i].lastSeen = now; records[i].resolutionReason = "verified"; return records[i]
+        records[i].resolvedAt = now; records[i].lastSeen = now; records[i].resolutionReason = reason; return records[i]
     }
     private static func trim(_ records: inout [GuardIncident]) { records = Array((records.filter { $0.resolvedAt == nil } + records.filter { $0.resolvedAt != nil }.prefix(200)).prefix(240)) }
 }
@@ -251,7 +254,7 @@ public enum DiagnosticExport {
         }
         let allowedKeys = Set(["clash", "topology", "selector", "claude-network", "gpt-network", "claude-route", "claude-country", "gpt-country", "claude-ip", "protection", "no-backup", "switch", "switch-budget", "budget", "subscription", "shared", "network", "state"])
         let incidents = (state.incidents ?? []).prefix(200).map { r -> [String: Any] in
-            ["key": allowedKeys.contains(r.key) ? r.key : "other", "level": ["warning", "critical", "info"].contains(r.level) ? r.level : "other", "count": r.count, "first_seen": ISO8601DateFormatter().string(from: r.firstSeen), "last_seen": ISO8601DateFormatter().string(from: r.lastSeen), "resolved": r.resolvedAt != nil, "end_reason": r.resolutionReason == "contextChanged" ? "contextChanged" : "verifiedOrOpen", "front": r.frontName.map { alias($0, inventory: r.inventoryKey) } ?? "unknown"]
+            ["key": allowedKeys.contains(r.key) ? r.key : (SharedFailureDetector.line(fromIncidentKey: r.key) != nil ? "line" : "other"), "level": ["warning", "critical", "info"].contains(r.level) ? r.level : "other", "count": r.count, "first_seen": ISO8601DateFormatter().string(from: r.firstSeen), "last_seen": ISO8601DateFormatter().string(from: r.lastSeen), "resolved": r.resolvedAt != nil, "end_reason": r.resolutionReason == "contextChanged" || r.resolutionReason == "unobserved" ? r.resolutionReason! : "verifiedOrOpen", "front": r.frontName.map { alias($0, inventory: r.inventoryKey) } ?? "unknown"]
         }
         let report: [String: Any] = ["format": 1, "app_version": version, "generated_at": ISO8601DateFormatter().string(from: Date()), "controller_connected": connected, "network": ["Wi-Fi", "有线", "离线", "其他", "等待网络"].contains(network) ? network : "其他", "protection_phase": protection.rawValue, "settings": ["strict": state.settings.strictProtection, "auto_switch": state.settings.autoSwitch, "prefer_best": state.settings.preferBestNode, "automatic_scan": state.settings.automaticFullScan, "automatic_pool": state.settings.automaticBackupPool, "idle_seconds": state.settings.idleSeconds, "backup_pool_size": state.settings.backupPoolSize], "records": history, "incidents": incidents, "privacy": "No credentials, subscription URLs, raw config, raw messages, node names, IP addresses, local paths or chat content included."]
         var output = report

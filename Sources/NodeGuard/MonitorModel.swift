@@ -163,6 +163,7 @@ private struct RuntimePoll {
         if state.switchingJournal == nil { state.switchingJournal = SwitchingJournal.migratingLegacy(state.events, inventory: state.inventoryKey) }
         if state.healthChecks == nil { state.healthChecks = [] }; if state.incidents == nil { state.incidents = [] }
         for item in state.incidents ?? [] where item.resolvedAt == nil { issues[item.key] = item.message }
+        state.performanceRetryAt = FullScanQueue.activeRetry(state.performanceRetryAt)
         for item in state.switchingJournal?.records ?? [] where item.inventoryKey == state.inventoryKey {
             if item.status == .verified { quarantined[item.from] = max(quarantined[item.from] ?? .distantPast, item.date.addingTimeInterval(item.reason == .optimization ? 3600 : 1800)) }
             else { quarantined[item.to] = max(quarantined[item.to] ?? .distantPast, item.date.addingTimeInterval(1800)) }
@@ -353,6 +354,7 @@ private struct RuntimePoll {
         if settings.strictProtection && strictMachine.needsNetworkRecovery {
             if issues["network-hold"] == nil { issue("network-hold", settings.autoSwitch ? "Claude 出口持续不通但未见 IP 或路由异常，保留 Claude，正在更换前置重试" : "Claude 出口持续不通但未见 IP 或路由异常，保留 Claude；自动切换未开启，请手动更换前置") }
         } else if issues["network-hold"] != nil { clear("network-hold") }
+        reconcileLineAlerts()
         if !networkAvailable { return }
         if testing && purpose != "recovery" && Date().timeIntervalSince(lastLoadDate) > 6 { activeCancellation?.cancel("网络状态采样过期，先让行") }
         if !fastBusy {
@@ -518,7 +520,7 @@ private struct RuntimePoll {
     }
     func runRanking() {
         guard !testing, !demo, !readOnly, inventoryStable else { return }
-        queue.schedule(); state.lastFullScan = nil; forceRound = true; save(); refreshScanStatus(); advanceScan()
+        queue.schedule(); state.lastFullScan = nil; state.performanceRetryAt = FullScanQueue.activeRetry(state.performanceRetryAt); forceRound = true; save(); refreshScanStatus(); advanceScan()
     }
     private func acceptInventory(_ result: Result<SubscriptionInventory, Error>) {
         switch result {
@@ -576,7 +578,7 @@ private struct RuntimePoll {
               settings.automaticFullScan || forceRound else { return }
         let wasComplete = queue.pending.isEmpty
         queue.beginDueRound()
-        if wasComplete && !queue.pending.isEmpty { state.lastFullScan = nil; save() }
+        if wasComplete && !queue.pending.isEmpty { state.lastFullScan = nil; state.performanceRetryAt = FullScanQueue.activeRetry(state.performanceRetryAt); save() }
         guard workloadAllowsTests, let name = queue.pending.first, let current = snapshot, let key = queue.inventory?.key else { return }
         if settings.autoSwitch && (claudeFailures >= 2 || Date().timeIntervalSince(lastSpeedStart) >= settings.slowCheckInterval) && (state.switchingJournal ?? SwitchingJournal()).block(reason: .failure, candidate: nil, inventory: state.inventoryKey) == nil { return }
         guard reserve(CandidateProbe.reservationBytes) else { return }
@@ -597,7 +599,7 @@ private struct RuntimePoll {
             queue.finish(node: name, inventoryKey: key, interval: settings.fullScanInterval)
             if name == currentFront, measurement(name)?.stages.contains(where: { $0.stage == .upload && $0.status != .deferred }) == true { lastSpeedStart = Date() }
             if queue.pending.isEmpty {
-                if let retry = state.performanceRetryAt { queue.retryEarlier(at: max(Date().addingTimeInterval(15), retry)) }
+                state.performanceRetryAt = queue.finishRound(performanceRetry: state.performanceRetryAt)
                 forceRound = false; state.lastFullScan = Date(); event("info", "订阅「\(subscriptionName)」本轮 \(queue.total) 个前置节点测试完成")
             }
             refreshScanStatus(); save()
@@ -811,11 +813,31 @@ private struct RuntimePoll {
             let stats = summary(copy.name); copy.samples = stats.total; copy.reliability = stats.ratio ?? 0
             state.measurements.removeAll { $0.name == copy.name && $0.inventoryKey == copy.inventoryKey }; state.measurements.append(copy)
         }
-        if let common = SharedFailureDetector.assess(history, inventory: state.inventoryKey) {
-            sharedDiagnosis = common.title; issue("shared", common.title)
+        let common = SharedFailureDetector.assess(history, inventory: state.inventoryKey)
+        if let common = common, let line = common.line {
+            dismiss("shared"); issue(SharedFailureDetector.lineIncidentKey(line), common.title, scoped: false)
+        } else if let common = common {
+            issue("shared", common.title)
             if copy.kind != .health && copy.performanceDeferred != true && common.defersPerformance && state.performanceRetryAt.map({ $0 > Date() }) != true { state.performanceRetryAt = Date().addingTimeInterval(300) }
-        } else { sharedDiagnosis = nil; clear("shared") }
+        } else { clear("shared") }
+        reconcileLineAlerts()
+        sharedDiagnosis = common?.title ?? lineDiagnosis
         refreshDerived(force: true); save()
+    }
+    private var lineDiagnosis: String? { issues.filter { SharedFailureDetector.line(fromIncidentKey: $0.key) != nil }.sorted { $0.key < $1.key }.first?.value }
+    private func reconcileLineAlerts() {
+        guard inventoryStable else { return }
+        var closed = false
+        for incident in state.incidents ?? [] where incident.resolvedAt == nil {
+            guard let line = SharedFailureDetector.line(fromIncidentKey: incident.key) else { continue }
+            guard incident.inventoryKey == state.inventoryKey else { dismiss(incident.key); closed = true; continue }
+            switch SharedFailureDetector.lineStatus(history, line: line, since: incident.firstSeen, inventory: state.inventoryKey) {
+            case .failing: break
+            case .recovered: clear(incident.key); closed = true
+            case .unobserved: dismiss(incident.key); closed = true; event("info", "「\(line)」超过 15 分钟没有新的大上传结果，告警先收起；线路是否恢复要等下次测速确认")
+            }
+        }
+        if closed { sharedDiagnosis = issues["shared"] ?? lineDiagnosis }
     }
     private func maintainBackups() {
         guard !demo, !readOnly, !paused, !enrolling, !testing, inventoryStable, workloadAllowsTests, let current = snapshot, let key = state.inventoryKey else { return }
@@ -870,9 +892,10 @@ private struct RuntimePoll {
             if result.failed > 0 { event("critical", "有 \(result.failed) 个 Claude 进程无法结束，请立即人工退出", notify: true) }
         }
     }
-    private func issue(_ key: String, _ message: String, level: String = "warning", since: Date? = nil, observations: Int = 1) {
+    // An unscoped incident concerns a line rather than the current front, so switching front does not reopen it.
+    private func issue(_ key: String, _ message: String, level: String = "warning", since: Date? = nil, observations: Int = 1, scoped: Bool = true) {
         issues[key] = message
-        var records = state.incidents ?? []; let change = IncidentLedger.raise(&records, key: key, level: level, message: message, inventory: inventoryStable ? state.inventoryKey : nil, front: currentFront, since: since, observations: observations); state.incidents = records
+        var records = state.incidents ?? []; let change = IncidentLedger.raise(&records, key: key, level: level, message: message, inventory: inventoryStable ? state.inventoryKey : nil, front: scoped ? currentFront : nil, since: since, observations: observations); state.incidents = records
         if change != .updated { event(level, message, notify: true) } else { save() }
     }
     private func clear(_ key: String) {
@@ -885,6 +908,12 @@ private struct RuntimePoll {
                 event("info", "出口复验通过：\(resolved.message)（告警到复验 \(duration) 秒，\(resolved.count) 次失败探测）", notify: true)
             } else { event("info", "已恢复：\(resolved.message)（持续 \(duration) 秒，\(resolved.count) 次观察）", notify: true) }
         }
+    }
+    // Closes an incident without claiming recovery: no "已恢复" event, no notification.
+    private func dismiss(_ key: String) {
+        issues.removeValue(forKey: key)
+        var records = state.incidents ?? []
+        if IncidentLedger.close(&records, key: key, reason: "unobserved") != nil { state.incidents = records; save(); onStatusChange?() }
     }
     private func event(_ level: String, _ message: String, notify: Bool = false) {
         state.events.insert(GuardEvent(level: level, message: message), at: 0); state.events = Array(state.events.prefix(200)); save(); onStatusChange?()
